@@ -14,6 +14,9 @@ export interface Intent extends Drive {
   cut?: boolean;
   /** Leave button (finale only), edge-triggered */
   leave?: boolean;
+  /** Point-to-go stick: the heading to drive toward (yaw), and how hard (0..1). */
+  heading?: number;
+  mag?: number;
 }
 
 const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
@@ -43,4 +46,14 @@ export function keysToDrive(k: Keys): Drive {
 export function stickToDrive(x: number, y: number, dead = 0.18): Drive {
   const dz = (v: number) => (Math.abs(v) < dead ? 0 : (v - Math.sign(v) * dead) / (1 - dead));
   return { throttle: clamp(-dz(y)), steer: clamp(-dz(x)) };
+}
+
+/**
+ * Point-to-go stick for phones: the stick points where the machine should go on screen.
+ * Up the screen is yaw 0. Returns null inside the dead zone.
+ */
+export function stickToHeading(x: number, y: number, dead = 0.22): { heading: number; mag: number } | null {
+  const m = Math.hypot(x, y);
+  if (m < dead) return null;
+  return { heading: Math.atan2(-x, -y), mag: Math.min(1, (m - dead) / (1 - dead)) };
 }

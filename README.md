@@ -41,6 +41,10 @@ npm test        # Vitest: plays every job, including the failures
 npm run build   # static site in dist/
 ```
 
+## Live
+
+https://agent0067.clidk.com
+
 ## Credit
 
 The bulldozer metaphor is Remington Loose's, from *The Art of Network Engineering* with Andy Lapteff ("Why Network Engineers Are Built for the AI Era").

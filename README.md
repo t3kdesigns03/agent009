@@ -1,47 +1,45 @@
 # Agent009
 
-**Agent009** is a playable lesson: you drive a bulldozer and learn, by failing, how an agentic build actually works. The big yellow machine is the **model** — strong, and useless on its own. **Yoke** is the wheel that binds travel and steer; without it the model sits. **Context** is the few facts an agent is handed (two at most — a forty-page novel is noise). **Tools** are the iron on the front: a blade pushes, a scoop lifts. **Skills** are knowing how to use the tool: deep in the middle, shallow on the shelf, blade up for the ramp. The **goal** is one sentence: "I want a lake over there." **Hooks** are hard stops a polite request cannot talk past. **Dispatch** hands one fact to each agent, never digs, and leaves when the lake is real.
+**Agent009** is a learn-and-do lesson in how an AI agent works, on one bulldozer site. A bigger model is a bigger bulldozer, which doesn't make it a useful one. Useful is the whole stack: the **model** (the machine), its **tools** (the yoke that binds it to the tracks, and the iron on the front), its **context** (a three-slot packet of facts you perceived), a **plan** (a work order you grade before anyone drives), **guardrails** (a hook a polite request can't talk past), an **Orchestrator** that dispatches several agents, and the **harness**: the loop that runs every one of them (perceive → plan → act → observe → check → repeat or hand off).
+
+You are the operator. The agent is the yellow stack. In Jobs 1–3 you drive by hand. In Job 4 you write and grade the plan, and the agent can drive it. In Job 5 you pick the rule and test it. In Job 6 you dispatch four agents and never touch a lever.
+
+## One site, six jobs
+
+Same dig, next step. What you scan, cut and decide carries over to the next job (saved in your browser).
+
+| # | Job | Block | You do |
+| --- | --- | --- | --- |
+| 1 | YOKE | Tools: binding | Bind the yoke, cross the dead belt (it drops the link), re-bind, reach the survey point. K is your kill switch, drawn differently. |
+| 2 | SURVEY | Context | Scan (F) the unsurveyed field, find the soft bank in front of the existing water, route around it, write a 3-slot context packet. |
+| 3 | RIGGER | Tools: selection | Pick blade, bucket or ripper **in the scene** at the rack, then cut shelf row 4 (A4–F4, **6 cells**). AUTO drives your work order once you've chosen. |
+| 4 | GRADE | Plan | Grade a flawed draft plan, fix it, run it (the agent drives) or drive it yourself. Before / plan / after comparison. |
+| 5 | WARDEN | Guardrails | Pick hook, request, approval gate or "bigger model". Test the fence, cut the overflow channel, then watch what stops a very polite radio request. |
+| 6 | DISPATCH | Orchestrator + harness | Assign SCOUT, DOZER, LOADER and TRUCK, set their packets and who waits for whose handoff, watch them run in parallel, merge, fill the lake, LEAVE. |
+
+Every clear shows a dashboard with real numbers (distance, time, retries, hazards, tool calls, context items, cells revisited, waste) and an **efficiency score out of 100**, plus a four-part debrief (what happened · what it is in an agent · next time · what's next) with a second example that uses no bulldozer. Each check asks about what you actually hit. A wrong answer explains itself, costs points, and must be acknowledged before you pick again.
 
 ## Controls
 
 | Action | Keyboard | Phone |
 | --- | --- | --- |
-| Drive the way the blade points / reverse | W / S | Stick up / down |
-| Turn left / right | A / D | Stick left / right |
-| Use: bind a dead Yoke, or cycle the blade (up, shelf, deep) | F | **Use** |
-| Cut: drop Yoke | K | **Cut** |
-| Leave (job 6 only) | L | **Leave** |
+| Drive / turn | W S A D (or arrows) | Point the stick where you want to go |
+| Use: bind, scan, mount a tool, lower / raise the blade | F or Space | **F** button (it always shows what it will do) |
+| Cut the yoke (kill switch) | K | **K · CUT** |
+| Hand the work order to the agent (Jobs 3–4) | — | **AUTO** |
+| Leave (Job 6) | L | **LEAVE** |
+| Restart / jobs / vocabulary | R / Esc / ? | ↻ / ✕ / ? |
 
-Six jobs unlock in order: Yoke, Survey, Rigger, Grade, Warden, Dispatch. Each clear ends with a question; **Next** appears only after the right answer. Progress is saved in `localStorage` under `agent009-v1`.
-
-## What changed in v2
-
-Every job was replayed in the browser, with the right packet and the wrong ones, on a phone and on a wide desktop. Fixes:
-
-- **Grade** no longer fails on the first move without the shape fact. The blade lifts and drives, but only knows one depth when lowered, so the fail lands on the shelf, where the lesson is. The extra "lift" fact now earns its place: it warns before the ramp.
-- **Rigger** with no tool, or with the scoop, fails at the flag with a reason instead of leaving you stuck.
-- **Survey** shows the pond and the soft bank after a blind fail, so you see what you missed.
-- **Every fail** marks the tile that caused it, and the fail panel sits at the bottom so the site stays visible.
-- **Yoke** dead shows a banner and pulses USE. The HUD always says what F does next.
-- **Camera** looks ahead and centers small sites instead of showing walls of rock. Fog follows the machine.
-- **Dispatch** shows the handoff checklist (Survey → Operator → Rigger → Grade → Warden → crew parks), the working crew member waves, the crew runs at ×2 by default (tap for ×1 / ×4), and LEAVE pulses when they park.
-- **Keys:** R restart, Esc jobs, Enter retry / next, 1–3 answer the check. RESTART button in the HUD. Reset progress on the jobs screen.
-- Larger HUD type on big screens; phone layout keeps the log clear of the buttons.
+Progress stays in `localStorage` under `agent009-v1` (same key as v1, so earlier unlocks carry over). No account, no server, no API keys.
 
 ## Run it
 
 ```bash
 npm install
-npm run dev     # play at http://localhost:5173
-npm test        # Vitest: yoke, packets, hooks, tools, grade, the finale
+npm run dev     # http://localhost:5173
+npm test        # Vitest: plays every job, including the failures
 npm run build   # static site in dist/
 ```
-
-Deploy: `npx netlify deploy --prod --dir=dist`
-
-## Live
-
-https://agent0067.netlify.app
 
 ## Credit
 

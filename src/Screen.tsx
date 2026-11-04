@@ -1,39 +1,52 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
-import { AGENT_NAME, AGENT_ORDER, CARDS, FINALE_CHOICES, type AgentId, type CardId } from './game/cards';
-import { CHECKS } from './game/checks';
-import { assignAgent, orchestrate, type Packet, type Step } from './game/dispatch';
-import { bufferSize, draw, newCam, updateCam } from './game/draw';
-import { JOB_ORDER, LEVEL, PHASES, needed, shape, type JobId, type Phase } from './game/levels';
-import { isUnlocked, loadProgress, saveProgress, type Progress } from './game/progress';
-import { createSim, modeLabel, nextUse, step, type Sim } from './game/sim';
-import { keysToDrive, stickToDrive, type Intent, type Keys } from './game/yoke';
+import { useCallback, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { JOBS } from './game/content';
+import { emptyBoard, type Board } from './game/crew';
+import { JOB_ORDER, nextJob, type JobId } from './game/ids';
+import { draftPlan, type Plan } from './game/plan';
+import { isUnlocked, loadProgress, recordClear, saveProgress, startSnapshot, type Progress } from './game/progress';
+import { RIGGER_TARGET } from './game/site';
+import type { Snapshot } from './game/snapshot';
+import { BLOCK, WHO } from './game/vocab';
+import { Play, type RunCfg } from './ui/Play';
+import { DispatchBoard, GuardPick, PlanEditor } from './ui/Setup';
+import { Glossary, HarnessRing, StackDiagram } from './ui/Stack';
 
 type View =
   | { v: 'title' }
   | { v: 'jobs' }
   | { v: 'brief'; job: JobId }
-  | { v: 'play'; job: JobId; cards: CardId[]; steps: Step[]; run: number };
+  | { v: 'play'; job: JobId; cfg: RunCfg; run: number; tour: boolean };
 
-const reducedMotion = () =>
-  typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+interface Tally {
+  retries: number;
+  wrongPicks: number;
+}
 
 export function Screen() {
   const [view, setView] = useState<View>({ v: 'title' });
   const [progress, setProgress] = useState<Progress>(() => loadProgress());
-  // Packets remembered per job so Retry/Brief keep the last choice.
-  const [packets, setPackets] = useState<Partial<Record<JobId, CardId[]>>>({});
-  const [finale, setFinale] = useState<Partial<Record<AgentId, CardId | null>>>({});
+  const [plans, setPlans] = useState<Partial<Record<JobId, Plan>>>({});
+  const [board, setBoard] = useState<Board>(() => emptyBoard());
+  const tally = useRef<Partial<Record<JobId, Tally>>>({});
+  const toured = useRef<Set<JobId>>(new Set());
+  const t = (j: JobId) => (tally.current[j] ??= { retries: 0, wrongPicks: 0 });
 
-  const clear = useCallback((job: JobId) => {
+  const play = (job: JobId, cfg: RunCfg = {}) => {
+    const tour = !toured.current.has(job);
+    toured.current.add(job);
+    setView({ v: 'play', job, cfg, run: Date.now(), tour });
+  };
+  const cleared = useCallback((job: JobId, snap: Snapshot, score: number) => {
     setProgress((p) => {
-      if (p.cleared.includes(job)) return p;
-      const next = { cleared: [...p.cleared, job] };
+      const next = recordClear(p, job, snap, score);
       saveProgress(next);
       return next;
     });
+    tally.current[job] = { retries: 0, wrongPicks: 0 };
   }, []);
 
-  if (view.v === 'title') return <Title onStart={() => setView({ v: 'jobs' })} />;
+  if (view.v === 'title')
+    return <Landing progress={progress} onStart={() => setView({ v: 'jobs' })} />;
   if (view.v === 'jobs')
     return (
       <Jobs
@@ -41,74 +54,123 @@ export function Screen() {
         onPick={(job) => setView({ v: 'brief', job })}
         onBack={() => setView({ v: 'title' })}
         onReset={() => {
-          const next = { cleared: [] };
+          const next: Progress = { cleared: [], site: {}, best: {} };
           saveProgress(next);
           setProgress(next);
         }}
       />
     );
   if (view.v === 'brief') {
-    if (view.job === 'dispatch')
-      return (
-        <FinaleBrief
-          picks={finale}
-          setPicks={setFinale}
-          onBack={() => setView({ v: 'jobs' })}
-          onGo={(steps) => setView({ v: 'play', job: 'dispatch', cards: steps.map((s) => s.card), steps, run: Date.now() })}
-        />
-      );
+    const job = view.job;
+    const snap = startSnapshot(progress, job);
     return (
       <Brief
-        job={view.job}
-        picked={packets[view.job] ?? []}
-        setPicked={(c) => setPackets((p) => ({ ...p, [view.job]: c }))}
+        job={job}
+        snap={snap}
+        plan={plans[job] ?? snap.plan ?? draftPlanFor(snap)}
+        setPlan={(p) => setPlans((x) => ({ ...x, [job]: p }))}
+        board={board}
+        setBoard={setBoard}
+        onWrong={() => t(job).wrongPicks++}
         onBack={() => setView({ v: 'jobs' })}
-        onGo={(cards) => setView({ v: 'play', job: view.job, cards, steps: [], run: Date.now() })}
+        onGo={(cfg) => play(job, cfg)}
       />
     );
   }
+  const job = view.job;
   return (
     <Play
       key={view.run}
-      job={view.job}
-      cards={view.cards}
-      steps={view.steps}
-      onRetry={() => setView({ ...view, run: Date.now() })}
-      onBrief={() => setView({ v: 'brief', job: view.job })}
+      job={job}
+      snap={startSnapshot(progress, job)}
+      cfg={view.cfg}
+      tour={view.tour}
+      extras={() => ({ retries: t(job).retries, wrongPicks: t(job).wrongPicks, quizWrong: 0 })}
+      onFail={() => t(job).retries++}
+      onWrong={() => t(job).wrongPicks++}
+      onCleared={(s, score) => cleared(job, s, score)}
+      onRetry={() => setView({ ...view, run: Date.now(), tour: false })}
+      onBrief={() => setView({ v: 'brief', job })}
       onJobs={() => setView({ v: 'jobs' })}
-      onCleared={() => clear(view.job)}
       onNext={() => {
-        const i = JOB_ORDER.indexOf(view.job);
-        const next = JOB_ORDER[i + 1];
-        setView(next ? { v: 'brief', job: next } : { v: 'jobs' });
+        const n = nextJob(job);
+        setView(n ? { v: 'brief', job: n } : { v: 'jobs' });
       }}
     />
   );
 }
 
-/* ---------- Title ---------- */
+/** Job 4 starts from the draft, with row 4 marked as already cut. */
+function draftPlanFor(_snap: Snapshot): Plan {
+  return draftPlan();
+}
 
-function Title({ onStart }: { onStart: () => void }) {
+/* ---------- Landing: what this is, who you are, the stack ---------- */
+
+function Landing({ progress, onStart }: { progress: Progress; onStart: () => void }) {
+  const [gloss, setGloss] = useState(false);
+  const any = progress.cleared.length > 0;
   return (
-    <main className="page title">
-      <div className="title-block">
+    <main className="page landing">
+      <header className="hero">
         <h1 className="logo">AGENT009</h1>
-        <p className="tagline">&ldquo;I want a lake over there.&rdquo;</p>
-      </div>
-      <div className="intro">
-        <p>A bigger model is a bigger bulldozer. That is not a useful one.</p>
-        <p>
-          Useful is the whole site: the machine, the levers, a few facts, the right tool, the skill to use it, one
-          goal, and hard stops a polite request cannot talk past.
+        <p className="tagline">“I want a lake over there.”</p>
+        <p className="lede">
+          A bigger model is a bigger bulldozer. That doesn’t make it a useful one. Useful is the whole stack: the machine, its
+          levers, a few facts, the right tool, a plan, and hard stops a polite request can’t talk past.
         </p>
-        <p>An agent is not the bulldozer. An agent is that stack, handed an outcome.</p>
-      </div>
-      <button className="btn primary big" onClick={onStart} autoFocus>
-        START
-      </button>
+        <button className="btn primary big" onClick={onStart} autoFocus>
+          {any ? `CONTINUE · ${progress.cleared.length}/6 CLEAR` : 'START ON SITE'}
+        </button>
+      </header>
+
+      <section className="who">
+        <div>
+          <span className="label">YOU</span>
+          <p>{WHO.you}</p>
+        </div>
+        <div>
+          <span className="label">THE AGENT</span>
+          <p>{WHO.it}</p>
+        </div>
+        <p className="arc">{WHO.arc}</p>
+      </section>
+
+      <section>
+        <h2 className="label">THE SYLLABUS · ONE SITE, SIX JOBS, ONE STACK</h2>
+        <p className="dim">
+          Every job is the same dig, one step further on. What you find, cut and decide carries over. Each block below lights
+          up when its job is clear.
+        </p>
+        <StackDiagram lit={['harness', ...progress.cleared.flatMap((j) => JOBS[j].blocks)]} cleared={progress.cleared} />
+      </section>
+
+      <section className="harness-sec">
+        <div>
+          <h2 className="label">THE HARNESS</h2>
+          <p>
+            The harness is the loop that runs an agent. It <b>perceives</b> (scans the ground), <b>plans</b> (reads the work
+            order), <b>acts</b> through a tool call, <b>observes</b> the result, <b>checks</b> its guardrails, then repeats or
+            hands off. Its context and memory, your packet and plan, are carried into every turn.
+          </p>
+          <p className="dim">
+            Every job’s HUD shows this loop, with the stage that’s running lit. Every debrief names the stage you just used. In
+            Job 6 you watch four harnesses run at once.
+          </p>
+        </div>
+        <HarnessRing />
+      </section>
+
+      <section>
+        <button className="btn" onClick={() => setGloss((g) => !g)} aria-expanded={gloss}>
+          {gloss ? 'HIDE' : 'SHOW'} THE VOCABULARY · ONE TERM PER THING
+        </button>
+        {gloss && <Glossary />}
+      </section>
+
       <p className="credit">
-        The bulldozer metaphor is Remington Loose&rsquo;s, from <em>The Art of Network Engineering</em> with Andy
-        Lapteff (&ldquo;Why Network Engineers Are Built for the AI Era&rdquo;).
+        The bulldozer metaphor is Remington Loose’s, from <em>The Art of Network Engineering</em> with Andy Lapteff (“Why
+        Network Engineers Are Built for the AI Era”).
       </p>
     </main>
   );
@@ -134,32 +196,47 @@ function Jobs({
         <button className="btn ghost" onClick={onBack}>
           ‹ AGENT009
         </button>
-        <span className="label dim">JOBS</span>
+        <span className="label dim">SITE PLAN · JOBS</span>
       </header>
       <ol className="jobs">
         {JOB_ORDER.map((id) => {
-          const l = LEVEL[id];
+          const m = JOBS[id];
           const open = isUnlocked(progress, id);
           const done = progress.cleared.includes(id);
+          const best = progress.best[id];
           return (
             <li key={id}>
               <button className="job" disabled={!open} onClick={() => onPick(id)}>
-                <span className="job-num">{String(l.num).padStart(2, '0')}</span>
+                <span className="job-num">{String(m.num).padStart(2, '0')}</span>
                 <span className="job-name">
-                  <span className="label">{l.name}</span>
-                  <span className="job-role">{l.role}</span>
+                  <span className="label">
+                    {m.name} {m.role.toUpperCase() !== m.name && <span className="job-role">· {m.role}</span>}
+                  </span>
+                  <span className="job-teach">
+                    {m.blocks
+                      .filter((b) => b !== 'harness')
+                      .map((b) => (
+                        <span key={b} className={`blockchip b-${b}`}>
+                          {BLOCK[b].name}
+                        </span>
+                      ))}{' '}
+                    {m.teaches}
+                  </span>
                 </span>
-                <span className={`job-state ${done ? 'done' : ''}`}>{done ? '✓ CLEAR' : open ? 'OPEN' : 'LOCKED'}</span>
+                <span className={`job-state ${done ? 'done' : ''}`}>
+                  {done ? (best !== undefined ? `✓ ${best}` : '✓ CLEAR') : open ? 'OPEN' : '🔒'}
+                </span>
               </button>
             </li>
           );
         })}
       </ol>
+      <p className="dim small">✓ number = your best efficiency score (100 is a clean run). Replays keep the site where you left it.</p>
       {progress.cleared.length > 0 && (
         <div className="reset">
           {confirm ? (
             <>
-              <span className="dim">Lock every job again?</span>
+              <span className="dim">Lock every job and reset the site?</span>
               <button className="btn small" onClick={() => (onReset(), setConfirm(false))}>
                 RESET
               </button>
@@ -178,33 +255,30 @@ function Jobs({
   );
 }
 
-/* ---------- Brief (jobs 1–5) ---------- */
+/* ---------- Brief ---------- */
 
 function Brief({
   job,
-  picked,
-  setPicked,
+  snap,
+  plan,
+  setPlan,
+  board,
+  setBoard,
+  onWrong,
   onBack,
   onGo,
 }: {
   job: JobId;
-  picked: CardId[];
-  setPicked: (c: CardId[]) => void;
+  snap: Snapshot;
+  plan: Plan;
+  setPlan: (p: Plan) => void;
+  board: Board;
+  setBoard: Dispatch<SetStateAction<Board>>;
+  onWrong: () => void;
   onBack: () => void;
-  onGo: (cards: CardId[]) => void;
+  onGo: (cfg: RunCfg) => void;
 }) {
-  const l = LEVEL[job];
-  const [reason, setReason] = useState('');
-  const toggle = (id: CardId) => {
-    setReason('');
-    setPicked(picked.includes(id) ? picked.filter((c) => c !== id) : [...picked, id]);
-  };
-  const go = () => {
-    if (!l.cards || !l.agent) return onGo([]);
-    const a = assignAgent(l.agent, picked);
-    if (!a.ok) return setReason(a.reason);
-    onGo(a.cards);
-  };
+  const m = JOBS[job];
   return (
     <main className="page">
       <header className="bar">
@@ -212,550 +286,56 @@ function Brief({
           ‹ JOBS
         </button>
         <span className="label dim">
-          JOB {l.num} · {l.name}
+          JOB {m.num} · {m.name}
         </span>
       </header>
       <section className="brief">
-        <h2 className="label">{l.role.toUpperCase()}</h2>
-        <p>{l.brief}</p>
-        <p className="objective">
-          <span className="label dim">GOAL</span> {l.objective}
-        </p>
-        {l.cards ? (
-          <>
-            <p className="label dim rule">PACKET · TWO FACTS AT MOST</p>
-            <div className="cards">
-              {l.cards.map((id) => (
-                <button
-                  key={id}
-                  className={`card ${picked.includes(id) ? 'on' : ''}`}
-                  onClick={() => toggle(id)}
-                  aria-pressed={picked.includes(id)}
-                >
-                  <span className="card-box">{picked.includes(id) ? '■' : '□'}</span>
-                  <span>{CARDS[id].text}</span>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <p className="label dim rule">NO CARD FORM</p>
-        )}
-        {reason && (
-          <p className="reason" role="alert">
-            REFUSED · {reason}
-          </p>
-        )}
-        <button className="btn primary big" onClick={go}>
-          RUN JOB
-        </button>
-      </section>
-    </main>
-  );
-}
-
-/* ---------- Finale brief ---------- */
-
-function FinaleBrief({
-  picks,
-  setPicks,
-  onBack,
-  onGo,
-}: {
-  picks: Partial<Record<AgentId, CardId | null>>;
-  setPicks: (p: Partial<Record<AgentId, CardId | null>>) => void;
-  onBack: () => void;
-  onGo: (steps: Step[]) => void;
-}) {
-  const [reason, setReason] = useState('');
-  const go = () => {
-    const packet: Packet = {};
-    for (const a of AGENT_ORDER) {
-      const c = picks[a];
-      if (c) packet[a] = [c];
-    }
-    const r = orchestrate(packet);
-    if (!r.ok) return setReason(r.reason);
-    onGo(r.steps);
-  };
-  return (
-    <main className="page">
-      <header className="bar">
-        <button className="btn ghost" onClick={onBack}>
-          ‹ JOBS
-        </button>
-        <span className="label dim">JOB 6 · DISPATCH</span>
-      </header>
-      <section className="brief">
-        <h2 className="label">DISPATCH</h2>
-        <p className="goal">&ldquo;I want a lake over there.&rdquo;</p>
-        <p>{LEVEL.dispatch.brief}</p>
-        {AGENT_ORDER.map((a, n) => (
-          <fieldset key={a} className="agent">
-            <legend className="label">
-              {n + 1}. {AGENT_NAME[a].toUpperCase()}
-            </legend>
-            {FINALE_CHOICES[a].map((id) => (
-              <button
-                key={id}
-                className={`card ${picks[a] === id ? 'on' : ''}`}
-                aria-pressed={picks[a] === id}
-                onClick={() => {
-                  setReason('');
-                  setPicks({ ...picks, [a]: picks[a] === id ? null : id });
-                }}
-              >
-                <span className="card-box">{picks[a] === id ? '●' : '○'}</span>
-                <span>{CARDS[id].text}</span>
-              </button>
-            ))}
-          </fieldset>
-        ))}
-        {reason && (
-          <p className="reason" role="alert">
-            REFUSED · {reason}
-          </p>
-        )}
-        <button className="btn primary big" onClick={go}>
-          DISPATCH
-        </button>
-      </section>
-    </main>
-  );
-}
-
-/* ---------- Play ---------- */
-
-interface Hud {
-  status: Sim['status'];
-  reason: string;
-  yoke: boolean;
-  tool: string;
-  use: string;
-  hook: boolean;
-  log: string[];
-  progress: string;
-  phase: Phase | null;
-  passed: Phase[];
-  crewDone: boolean;
-  /** Yoke is dead and nobody else will bind it */
-  deadHint: boolean;
-}
-
-const PHASE_LABEL: Record<Phase, string> = {
-  survey: 'SURVEY',
-  operator: 'OPERATOR',
-  rigger: 'RIGGER',
-  grade: 'GRADE',
-  warden: 'WARDEN',
-  crew: 'CREW PARKS',
-};
-
-function hudOf(sim: Sim): Hud {
-  const s = shape(sim);
-  const part = (name: string, hit: number, n: number) =>
-    `${name} ${hit}/${n}${hit >= needed(n) ? ' ✓' : ` · NEED ${needed(n)}`}`;
-  let progress = '';
-  const id = sim.level.id;
-  if (id === 'rigger' || id === 'warden') progress = part('SHELF', s.shelfHit, s.shelfN);
-  if (id === 'warden') progress += ` · BUMPS ${sim.bumps}`;
-  if (id === 'grade' || id === 'dispatch')
-    progress = `${part('DEEP', s.deepHit, s.deepN)} · ${part('SHELF', s.shelfHit, s.shelfN)} · RAMP ${s.rampIntact ? 'OK' : 'CUT'}`;
-  return {
-    status: sim.status,
-    reason: sim.reason,
-    yoke: sim.yokeBound,
-    tool:
-      sim.tool === 'none'
-        ? 'NO TOOL'
-        : modeLabel(sim).replace(/\.$/, '').replace('. Locked', ' · LOCKED').replace('. One depth only', ' · ONE DEPTH').toUpperCase(),
-    use: nextUse(sim),
-    hook: sim.hook,
-    log: sim.log.slice(-3).map((l) => l.text),
-    progress,
-    phase: sim.auto?.phase ?? null,
-    passed: sim.auto ? [...sim.auto.passed] : [],
-    crewDone: !!sim.auto?.done,
-    deadHint: !sim.yokeBound && !(sim.auto && sim.beltTripped && !sim.auto.rebound),
-  };
-}
-
-const sameHud = (a: Hud, b: Hud) =>
-  a.status === b.status &&
-  a.yoke === b.yoke &&
-  a.tool === b.tool &&
-  a.use === b.use &&
-  a.progress === b.progress &&
-  a.phase === b.phase &&
-  a.passed.length === b.passed.length &&
-  a.crewDone === b.crewDone &&
-  a.deadHint === b.deadHint &&
-  a.log.join('|') === b.log.join('|');
-
-const RATES = [1, 2, 4];
-
-function Play({
-  job,
-  cards,
-  steps,
-  onRetry,
-  onBrief,
-  onJobs,
-  onCleared,
-  onNext,
-}: {
-  job: JobId;
-  cards: CardId[];
-  steps: Step[];
-  onRetry: () => void;
-  onBrief: () => void;
-  onJobs: () => void;
-  onCleared: () => void;
-  onNext: () => void;
-}) {
-  const level = LEVEL[job];
-  const simRef = useRef<Sim>(null as unknown as Sim);
-  if (!simRef.current) simRef.current = createSim(job, cards, steps);
-  if (import.meta.env.DEV) (window as unknown as { __sim: Sim }).__sim = simRef.current;
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const keys = useRef<Keys>({});
-  const stick = useRef({ x: 0, y: 0 });
-  const events = useRef<{ use?: boolean; cut?: boolean; leave?: boolean }>({});
-  const [hud, setHud] = useState<Hud>(() => hudOf(simRef.current));
-  const finale = job === 'dispatch';
-  const [rate, setRate] = useState(finale ? 2 : 1);
-  const rateRef = useRef(rate);
-  rateRef.current = rate;
-  const status = useRef(hud.status);
-  status.current = hud.status;
-  const actions = useRef({ onRetry, onJobs });
-  actions.current = { onRetry, onJobs };
-
-  // Keyboard
-  useEffect(() => {
-    const map: Record<string, keyof Keys> = {
-      KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd',
-      ArrowUp: 'w', ArrowLeft: 'a', ArrowDown: 's', ArrowRight: 'd',
-    };
-    const down = (e: KeyboardEvent) => {
-      if (map[e.code]) {
-        keys.current[map[e.code]] = true;
-        e.preventDefault();
-        return;
-      }
-      if (e.repeat) return;
-      if (e.code === 'Escape') return actions.current.onJobs();
-      if (status.current === 'win') return; // the check panel owns the keys
-      if (e.code === 'KeyR' || (e.code === 'Enter' && status.current === 'fail')) {
-        e.preventDefault();
-        return actions.current.onRetry();
-      }
-      if (e.code === 'KeyF') events.current.use = true;
-      else if (e.code === 'KeyK') events.current.cut = true;
-      else if (e.code === 'KeyL' && finale) events.current.leave = true;
-    };
-    const up = (e: KeyboardEvent) => {
-      if (map[e.code]) keys.current[map[e.code]] = false;
-    };
-    const blur = () => (keys.current = {});
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
-    window.addEventListener('blur', blur);
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', blur);
-    };
-  }, [finale]);
-
-  // Loop
-  useEffect(() => {
-    const canvas = canvasRef.current!;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-    const rm = reducedMotion();
-    const cam = newCam();
-    let raf = 0;
-    let last = performance.now();
-    let acc = 0;
-    let lastHud = hudOf(simRef.current);
-    const fit = () => {
-      const r = wrapRef.current!.getBoundingClientRect();
-      const { bw, bh } = bufferSize(r.width, r.height);
-      if (canvas.width !== bw || canvas.height !== bh) {
-        canvas.width = bw;
-        canvas.height = bh;
-        cam.ready = false;
-      }
-    };
-    fit();
-    const ro = new ResizeObserver(fit);
-    ro.observe(wrapRef.current!);
-    const DT = 1 / 60;
-    const frame = (now: number) => {
-      const sim = simRef.current;
-      const real = Math.min((now - last) / 1000, 0.25);
-      acc = Math.min(acc + real * rateRef.current, 0.25 * rateRef.current);
-      last = now;
-      while (acc >= DT) {
-        const k = keysToDrive(keys.current);
-        const s = stickToDrive(stick.current.x, stick.current.y);
-        const intent: Intent = {
-          throttle: Math.max(-1, Math.min(1, k.throttle + s.throttle)),
-          steer: Math.max(-1, Math.min(1, k.steer + s.steer)),
-          ...events.current,
-        };
-        events.current = {};
-        step(sim, intent, DT);
-        acc -= DT;
-      }
-      updateCam(cam, sim, canvas.width, canvas.height, real);
-      draw(ctx, sim, { bw: canvas.width, bh: canvas.height, reducedMotion: rm, t: now / 1000, cam });
-      const h = hudOf(sim);
-      if (!sameHud(h, lastHud)) {
-        lastHud = h;
-        setHud(h);
-      }
-      raf = requestAnimationFrame(frame);
-    };
-    raf = requestAnimationFrame(frame);
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-    };
-  }, []);
-
-  const press = (e: 'use' | 'cut' | 'leave') => () => {
-    events.current[e] = true;
-  };
-  const dead = hud.deadHint && hud.status === 'play';
-
-  return (
-    <main className="play">
-      <div className="screen" ref={wrapRef}>
-        <canvas ref={canvasRef} className="site" aria-label={`Job ${level.num}: ${level.objective}`} />
-        <div className="ticks" aria-hidden>
-          <i className="tl" />
-          <i className="tr" />
-          <i className="bl" />
-          <i className="br" />
-        </div>
-        <div className="hud top">
-          <div className="hud-left">
-            <div className="label watch">
-              JOB {level.num} · {level.name}
-            </div>
-            <div className="obj">{level.objective}</div>
-            {hud.progress && <div className="label prog">{hud.progress}</div>}
-            {finale && (
-              <ol className="phases label" aria-label="Handoffs">
-                {PHASES.map((p) => {
-                  const done = hud.passed.includes(p);
-                  const now = hud.phase === p;
-                  return (
-                    <li key={p} className={done ? 'done' : now ? 'now' : ''}>
-                      {done ? '✓' : now ? '▶' : '·'} {PHASE_LABEL[p]}
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </div>
-          <div className="hud-right">
-            <div className="hud-btns">
-              <button className="btn ghost small" onClick={onRetry} aria-label="Restart job (R)">
-                RESTART
-              </button>
-              <button className="btn ghost small" onClick={onJobs} aria-label="Back to jobs (Esc)">
-                JOBS
-              </button>
-            </div>
-            <span className={`chip ${hud.yoke ? 'ok' : 'bad'}`}>YOKE {hud.yoke ? 'LIVE' : 'DEAD'}</span>
-            <span className="chip">{hud.tool}</span>
-            {(job === 'warden' || finale) && (
-              <span className={`chip ${hud.hook ? 'ok' : ''}`}>HOOK {hud.hook ? 'ARMED' : 'NONE'}</span>
-            )}
-            {hud.use && !finale && <span className="chip hint">F · {hud.use}</span>}
-            {finale && (
-              <button
-                className="btn ghost small rate"
-                onClick={() => setRate((r) => RATES[(RATES.indexOf(r) + 1) % RATES.length])}
-                aria-label="Crew speed"
-              >
-                CREW ×{rate}
-              </button>
-            )}
-          </div>
-        </div>
-        {dead && (
-          <div className="toast label" role="status">
-            YOKE DEAD · PRESS F / USE
-          </div>
-        )}
-        {finale && hud.crewDone && hud.status === 'play' && (
-          <div className="toast label calm" role="status">
-            CREW PARKED · PRESS LEAVE
-          </div>
-        )}
-        <div className="log" aria-live="polite">
-          {hud.log.map((t, i) => (
-            <div key={`${i}-${t}`} className={i === hud.log.length - 1 ? 'new' : ''}>
-              {t}
-            </div>
+        <h2 className="label">
+          {m.name} {m.role.toUpperCase() !== m.name && <span className="dim">· {m.role}</span>}
+        </h2>
+        <div className="teaches">
+          {m.blocks.map((b) => (
+            <span key={b} className={`blockchip b-${b}`}>
+              {BLOCK[b].name}
+            </span>
           ))}
+          <span>{m.teaches}</span>
         </div>
-        <div className="hud bottom">
-          {finale ? (
-            <div className="handsoff label">HANDS OFF · THE CREW DRIVES</div>
-          ) : (
-            <Stick onMove={(x, y) => (stick.current = { x, y })} />
+        <p>{m.story}</p>
+        <p className="objective">
+          <span className="label dim">GOAL</span> {m.goal}
+        </p>
+        <p className="carried">
+          <span className="label dim">CARRIED OVER</span> {m.carried}
+          {job === 'grade' && snap.tool !== 'blade' && (
+            <b> You finished Job 3 with the {snap.tool.toUpperCase()}: the plan will need a swap to the blade at the rack.</b>
           )}
-          <div className="keys label">
-            {finale ? 'F USE · K CUT · L LEAVE · R RESTART' : 'WASD MOVE · F USE · K CUT · R RESTART'}
-          </div>
-          <div className="buttons">
-            <button className={`btn pad ${dead ? 'pulse' : ''}`} onPointerDown={press('use')}>
-              USE
-            </button>
-            <button className="btn pad" onPointerDown={press('cut')}>
-              CUT
-            </button>
-            {finale && (
-              <button className={`btn pad primary ${hud.crewDone ? 'pulse' : ''}`} onPointerDown={press('leave')}>
-                LEAVE
-              </button>
+        </p>
+        <p className="dim small">
+          <span className="label">CONTROLS</span> {m.controls}
+          {job !== 'dispatch' && ' · On a phone, point the stick where you want to go.'}
+        </p>
+
+        {job === 'grade' && (
+          <PlanEditor plan={plan} setPlan={setPlan} depth={snap.depth} onWrong={onWrong} onRun={(p, auto) => onGo({ plan: p, auto })} />
+        )}
+        {job === 'warden' && <GuardPick onWrong={onWrong} onGo={(g) => onGo({ guard: g })} />}
+        {job === 'dispatch' && <DispatchBoard board={board} setBoard={setBoard} onWrong={onWrong} onGo={(b) => onGo({ board: b })} />}
+        {(job === 'yoke' || job === 'survey' || job === 'rigger') && (
+          <>
+            {job === 'rigger' && (
+              <p className="note">
+                You’ll choose the tool <b>in the scene</b>: drive onto a bay on the rack and press F. Then cut row 4: {RIGGER_TARGET}{' '}
+                cells. If driving isn’t the point for you, press <b>AUTO</b> once a tool is mounted. The agent drives your work order,
+                and the tool choice stays yours.
+              </p>
             )}
-          </div>
-        </div>
-        {hud.status === 'fail' && (
-          <div className="overlay sheet">
-            <div className="panel">
-              <div className="label bad big-label">✕ FAILED</div>
-              <p className="why">{hud.reason}</p>
-              <div className="row">
-                <button className="btn primary" onClick={onRetry} autoFocus>
-                  RETRY
-                </button>
-                <button className="btn" onClick={onBrief}>
-                  {level.cards || finale ? 'CHANGE PACKET' : 'BRIEF'}
-                </button>
-              </div>
-            </div>
-          </div>
+            <button className="btn primary big" onClick={() => onGo({})}>
+              START JOB {m.num}
+            </button>
+          </>
         )}
-        {hud.status === 'win' && <CheckPanel job={job} onRight={onCleared} onNext={onNext} />}
-      </div>
+      </section>
     </main>
-  );
-}
-
-/* ---------- The check ---------- */
-
-function CheckPanel({ job, onRight, onNext }: { job: JobId; onRight: () => void; onNext: () => void }) {
-  const check = CHECKS[job];
-  const [tried, setTried] = useState<number[]>([]);
-  const [last, setLast] = useState<number | null>(null);
-  const solved = useMemo(() => tried.some((i) => check.choices[i].right), [tried, check]);
-  const pick = useCallback(
-    (i: number) => {
-      if (solved) return;
-      setLast(i);
-      setTried((t) => (t.includes(i) ? t : [...t, i]));
-      if (check.choices[i].right) onRight();
-    },
-    [solved, check, onRight],
-  );
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.repeat) return;
-      const n = ['Digit1', 'Digit2', 'Digit3', 'Numpad1', 'Numpad2', 'Numpad3'].indexOf(e.code);
-      if (n >= 0) pick(n % 3);
-      else if (e.code === 'Enter' && solved) {
-        e.preventDefault();
-        onNext();
-      }
-    };
-    window.addEventListener('keydown', down);
-    return () => window.removeEventListener('keydown', down);
-  }, [pick, solved, onNext]);
-  const isLast = job === 'dispatch';
-  return (
-    <div className="overlay">
-      <div className="panel check" role="dialog" aria-label="Check">
-        <div className="label ok big-label">✓ CLEAR</div>
-        <p className="ask">{check.ask}</p>
-        <div className="choices">
-          {check.choices.map((c, i) => {
-            const t = tried.includes(i);
-            return (
-              <button
-                key={i}
-                className={`choice ${t ? (c.right ? 'right' : 'wrong') : ''}`}
-                onClick={() => pick(i)}
-                disabled={solved && !c.right}
-              >
-                <span className="choice-text">
-                  <span className="choice-key">{i + 1}</span>
-                  {t ? (c.right ? '✓ ' : '✕ ') : ''}
-                  {c.text}
-                </span>
-                {t && <span className="choice-why">{c.why}</span>}
-              </button>
-            );
-          })}
-        </div>
-        {!solved && last !== null && <p className="label dim">PICK AGAIN</p>}
-        {solved && (
-          <button className="btn primary big" onClick={onNext} autoFocus>
-            {isLast ? 'JOBS' : 'NEXT'}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------- Thumb stick ---------- */
-
-function Stick({ onMove }: { onMove: (x: number, y: number) => void }) {
-  const base = useRef<HTMLDivElement>(null);
-  const [knob, setKnob] = useState({ x: 0, y: 0 });
-  const active = useRef<number | null>(null);
-  const move = (e: RPointerEvent) => {
-    const r = base.current!.getBoundingClientRect();
-    const R = r.width / 2;
-    let x = (e.clientX - (r.left + R)) / R;
-    let y = (e.clientY - (r.top + R)) / R;
-    const m = Math.hypot(x, y);
-    if (m > 1) {
-      x /= m;
-      y /= m;
-    }
-    setKnob({ x, y });
-    onMove(x, y);
-  };
-  const end = () => {
-    active.current = null;
-    setKnob({ x: 0, y: 0 });
-    onMove(0, 0);
-  };
-  return (
-    <div
-      ref={base}
-      className="stick"
-      role="application"
-      aria-label="Thumb stick: up drives, left turns left"
-      onPointerDown={(e) => {
-        active.current = e.pointerId;
-        e.currentTarget.setPointerCapture(e.pointerId);
-        move(e);
-      }}
-      onPointerMove={(e) => active.current === e.pointerId && move(e)}
-      onPointerUp={end}
-      onPointerCancel={end}
-      onLostPointerCapture={end}
-    >
-      <div className="knob" style={{ transform: `translate(${knob.x * 34}px, ${knob.y * 34}px)` }} />
-    </div>
   );
 }

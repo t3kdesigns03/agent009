@@ -29,7 +29,12 @@ export type AutoOp =
   | { kind: 'mode'; mode: Mode }
   | { kind: 'bump' }
   | { kind: 'park' }
-  | { kind: 'log'; text: string };
+  | { kind: 'log'; text: string }
+  | { kind: 'phase'; agent: Phase };
+
+/** Finale handoffs, in order. 'crew' is the crew parking after Warden. */
+export type Phase = AgentId | 'crew';
+export const PHASES: Phase[] = ['survey', 'operator', 'rigger', 'grade', 'warden', 'crew'];
 
 export interface LevelDef {
   id: JobId;
@@ -213,9 +218,11 @@ const LEVELS: LevelDef[] = [
     modes: () => ['up', 'shelf'],
     check: (sim) => {
       if (!onFlag(sim)) return null;
+      if (sim.tool === 'none') return { status: 'fail', reason: 'Bare front. Rigger never mounted the blade.' };
+      if (sim.tool === 'scoop') return { status: 'fail', reason: 'A scoop on the front. It cannot push this cut.' };
       const s = shape(sim);
-      if (sim.tool === 'blade' && s.shelfOK) return { status: 'win' };
-      notice(sim, `Flag. Shelf ${s.shelfHit}/${needed(s.shelfN)} with a ${sim.tool === 'none' ? 'bare front' : sim.tool}.`);
+      if (s.shelfOK) return { status: 'win' };
+      notice(sim, `Flag. Shelf ${s.shelfHit}/${needed(s.shelfN)}. Cut more of the shelf.`);
       return null;
     },
   },
@@ -245,7 +252,8 @@ const LEVELS: LevelDef[] = [
     cards: BRIEF_CARDS.grade,
     startTool: 'blade',
     hasPad: false,
-    modes: (cards) => (has(cards, 'grade.shape') ? ['up', 'shelf', 'deep'] : ['deep']),
+    // Without the shape fact the blade still lifts, but only knows one depth when lowered: deep.
+    modes: (cards) => (has(cards, 'grade.shape') ? ['up', 'shelf', 'deep'] : ['up', 'deep']),
     check: (sim) => {
       if (!parked(sim)) return null;
       const s = shape(sim);
@@ -326,10 +334,15 @@ const LEVELS: LevelDef[] = [
     modes: (cards) => (has(cards, 'grade.shape') ? ['up', 'shelf', 'deep'] : ['up', 'deep']),
     check: () => null, // Leave decides.
     auto: [
+      { kind: 'phase', agent: 'survey' },
+      { kind: 'log', text: 'SURVEY: the bank and the existing water are marked.' },
+      { kind: 'phase', agent: 'operator' },
       { kind: 'go', x: 7, z: 12 },
+      { kind: 'phase', agent: 'rigger' },
       { kind: 'go', x: 6, z: 12 },
       { kind: 'go', x: 6, z: 11 },
       { kind: 'go', x: 8, z: 11 },
+      { kind: 'phase', agent: 'grade' },
       { kind: 'go', x: 8, z: 8 },
       { kind: 'log', text: 'GRADE: shelf first.' },
       { kind: 'mode', mode: 'shelf' },
@@ -352,9 +365,11 @@ const LEVELS: LevelDef[] = [
       { kind: 'mode', mode: 'up' },
       { kind: 'go', x: 5, z: 10 },
       { kind: 'go', x: 9, z: 10 },
+      { kind: 'phase', agent: 'warden' },
       { kind: 'go', x: 9, z: 3 },
       { kind: 'log', text: 'WARDEN: testing the fence.' },
       { kind: 'bump' },
+      { kind: 'phase', agent: 'crew' },
       { kind: 'go', x: 9, z: 10 },
       { kind: 'go', x: 11, z: 10 },
       { kind: 'park' },

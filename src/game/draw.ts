@@ -1,4 +1,5 @@
 // The low-res site. Flat colors, olive fog, one yellow machine. No React.
+import { PHASES } from './levels';
 import type { Sim } from './sim';
 
 export const TILE = 16;
@@ -13,9 +14,13 @@ export function bufferSize(w: number, h: number): { bw: number; bh: number } {
 const C = {
   void: '#1d2417',
   fog: [62, 71, 48] as const,
-  rockTop: '#273017',
-  rockHi: '#323d24',
-  rockSide: '#171d11',
+  rockTop: '#1f241b',
+  rockHi: '#2b3226',
+  rockSide: '#101410',
+  boulder: '#444b3d',
+  failA: '#e0694a',
+  failB: '#f4f6e8',
+  deepPlan: '#4f5a3a',
   ground: '#5b6743',
   ground2: '#56613f',
   road: '#7a7d75',
@@ -75,11 +80,45 @@ function hash(x: number, z: number) {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
+export interface Cam {
+  x: number;
+  z: number;
+  ready: boolean;
+}
+
 export interface View {
   bw: number;
   bh: number;
   reducedMotion: boolean;
   t: number; // seconds, for small animation
+  cam: Cam;
+}
+
+export const newCam = (): Cam => ({ x: 0, z: 0, ready: false });
+
+/**
+ * Camera: look a little ahead of the machine, but never show more rock than it must.
+ * A site narrower than the screen is centered on that axis.
+ */
+export function updateCam(cam: Cam, sim: Sim, bw: number, bh: number, dt: number) {
+  const lead = Math.min(1, Math.abs(sim.speed) / 2) * 1.3;
+  let tx = sim.x - Math.sin(sim.yaw) * lead;
+  let tz = sim.z - Math.cos(sim.yaw) * lead;
+  const halfW = bw / 2 / TILE;
+  const halfH = bh / 2 / TILE;
+  const fit = (t: number, half: number, size: number) =>
+    size + 1 <= half * 2 ? size / 2 : Math.max(half - 0.5, Math.min(size - half + 0.5, t));
+  tx = fit(tx, halfW, sim.w);
+  tz = fit(tz, halfH, sim.h);
+  if (!cam.ready) {
+    cam.x = tx;
+    cam.z = tz;
+    cam.ready = true;
+    return;
+  }
+  const k = Math.min(1, dt * 5);
+  cam.x += (tx - cam.x) * k;
+  cam.z += (tz - cam.z) * k;
 }
 
 export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
@@ -90,9 +129,8 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
     sx = Math.round((Math.random() - 0.5) * 5);
     sy = Math.round((Math.random() - 0.5) * 5);
   }
-  // Camera: dozer a little below center so you see ahead.
-  const camX = Math.round(bw / 2 - sim.x * TILE) + sx;
-  const camY = Math.round(bh * 0.56 - sim.z * TILE) + sy;
+  const camX = Math.round(bw / 2 - v.cam.x * TILE) + sx;
+  const camY = Math.round(bh / 2 - v.cam.z * TILE) + sy;
 
   ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = C.void;
@@ -111,7 +149,7 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
       const px = camX + x * T;
       const py = camY + z * T;
       let k: Sim['kind'][number] = inside(x, z) ? sim.kind[i] : 'rock';
-      const hidden = !sim.surveyed && (k === 'water' || k === 'bank');
+      const hidden = !sim.surveyed && !sim.revealed && (k === 'water' || k === 'bank');
       if (hidden) k = 'ground';
       const hsh = hash(x, z);
 
@@ -166,7 +204,8 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
           // ground, flag, fence, crew: ground underneath, with depth
           const d = sim.depth[i];
           const t = sim.target[i];
-          ctx.fillStyle = d >= 2 ? C.deep : d === 1 ? C.shelf : hsh % 2 ? C.ground : C.ground2;
+          ctx.fillStyle =
+            d >= 2 ? C.deep : d === 1 ? C.shelf : t === 'deep' ? C.deepPlan : hsh % 2 ? C.ground : C.ground2;
           ctx.fillRect(px, py, T, T);
           if (d >= 2) {
             ctx.fillStyle = C.deepRim;
@@ -184,11 +223,14 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
             ctx.fillRect(px + T - 4, py + 2, 2, 2);
             ctx.fillRect(px + 2, py + T - 4, 2, 2);
           } else if (t === 'shelf' && d === 0) {
+            // dashed outline: cut me to shelf depth
             ctx.fillStyle = C.tick;
-            ctx.fillRect(px + 1, py + 7, 4, 1);
-            ctx.fillRect(px + T - 5, py + 7, 4, 1);
-            ctx.fillRect(px + 7, py + 1, 1, 3);
-            ctx.fillRect(px + 7, py + T - 4, 1, 3);
+            for (let q = 1; q < T - 1; q += 4) {
+              ctx.fillRect(px + q, py + 1, 2, 1);
+              ctx.fillRect(px + q, py + T - 2, 2, 1);
+              ctx.fillRect(px + 1, py + q, 1, 2);
+              ctx.fillRect(px + T - 2, py + q, 1, 2);
+            }
           } else if (t === 'ramp') {
             ctx.fillStyle = d > 0 ? C.deepRim : C.chevron;
             for (const oy of [3, 9]) {
@@ -218,9 +260,15 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
         ctx.fillRect(px, py - lift, T, T);
         ctx.fillStyle = C.rockHi;
         ctx.fillRect(px + (hsh % 6), py - lift, 6, 1);
-        if (hsh % 4 === 0) {
+        if (hsh % 3 === 0) {
+          // a boulder
+          const bx = px + 2 + (hsh % 7);
+          const by = py - lift + 3 + ((hsh >> 3) % 6);
+          ctx.fillStyle = C.boulder;
+          ctx.fillRect(bx, by, 5, 3);
+          ctx.fillRect(bx + 1, by - 1, 3, 1);
           ctx.fillStyle = C.rockSide;
-          ctx.fillRect(px + 3 + (hsh % 7), py - lift + 5 + ((hsh >> 3) % 5), 2, 1);
+          ctx.fillRect(bx, by + 3, 5, 1);
         }
       } else if (k === 'fence') {
         const flashing = sim.flash && sim.flash.i === i;
@@ -251,7 +299,20 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
     }
   }
 
-  // Crew by the flag, finale only.
+  // What went wrong, marked on the ground.
+  if (sim.failAt >= 0) {
+    const fx = sim.failAt % sim.w;
+    const fz = Math.floor(sim.failAt / sim.w);
+    const px = camX + fx * T;
+    const py = camY + fz * T;
+    ctx.fillStyle = Math.floor(v.t * 4) % 2 ? C.failA : C.failB;
+    ctx.fillRect(px, py, T, 2);
+    ctx.fillRect(px, py + T - 2, T, 2);
+    ctx.fillRect(px, py, 2, T);
+    ctx.fillRect(px + T - 2, py, 2, T);
+  }
+
+  // Crew by the flag, finale only. One figure per agent; the one working waves.
   if (sim.level.id === 'dispatch') {
     const spots: number[] = [];
     for (let i = 0; i < sim.kind.length; i++) if (sim.kind[i] === 'crew') spots.push(i);
@@ -263,14 +324,17 @@ export function draw(ctx: CanvasRenderingContext2D, sim: Sim, v: View) {
       for (let j = 0; j < per && n < 5; j++, n++) {
         const px = camX + tx * T + (per === 2 ? 2 + j * 8 : 6);
         const py = camY + tz * T + 3 + ((n * 3) % 2);
-        crewFigure(ctx, px, py, VESTS[n], Math.floor(v.t * 2 + n) % 6 === 0);
+        const working = sim.auto?.phase === PHASES[n];
+        crewFigure(ctx, px, py, VESTS[n], working ? Math.floor(v.t * 4) % 2 === 0 : Math.floor(v.t * 2 + n) % 9 === 0);
       }
     }
   }
 
   const img = ctx.getImageData(0, 0, bw, bh);
-  dozer(img, sim, bw / 2 + sx, bh * 0.56 + sy);
-  fog(img);
+  const dx = camX + sim.x * TILE;
+  const dy = camY + sim.z * TILE;
+  dozer(img, sim, dx, dy);
+  fog(img, (bw / 2 + dx) / 2, (bh / 2 + dy) / 2);
   ctx.putImageData(img, 0, 0);
 }
 
@@ -349,15 +413,15 @@ function dozer(img: ImageData, sim: Sim, cx: number, cy: number) {
   }
 }
 
-function fog(img: ImageData) {
+function fog(img: ImageData, cx: number, cy: number) {
   const { width: bw, height: bh, data } = img;
   const [fr, fg, fb] = C.fog;
   const hx = bw / 2;
   const hy = bh / 2;
   for (let y = 0; y < bh; y++) {
-    const dy = (y + 0.5 - hy) / hy;
+    const dy = (y + 0.5 - cy) / hy;
     for (let x = 0; x < bw; x++) {
-      const dx = (x + 0.5 - hx) / hx;
+      const dx = (x + 0.5 - cx) / hx;
       const r = Math.sqrt(dx * dx * 0.85 + dy * dy);
       let f = (r - 0.62) / 0.5;
       if (f <= 0) continue;

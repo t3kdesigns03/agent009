@@ -164,9 +164,10 @@ describe('Tools and grade', () => {
     expect(sim.reason).toContain('ramp');
   });
 
-  it('grade without the shape card is locked deep', () => {
+  it('grade without the shape card only knows one depth: deep', () => {
     const sim = createSim('grade', ['grade.lift']);
-    expect(sim.modes).toEqual(['deep']);
+    expect(sim.modes).toEqual(['up', 'deep']);
+    expect(sim.mode).toBe('up');
   });
 
   it('rigger with the blade card mounts a blade at the pad', () => {
@@ -221,6 +222,7 @@ describe('Dispatch finale', () => {
     const s = shape(sim);
     expect(s.deepOK && s.shelfOK && s.rampIntact).toBe(true);
     expect(sim.bumps).toBeGreaterThanOrEqual(1);
+    expect(sim.auto!.passed).toEqual(['survey', 'operator', 'rigger', 'grade', 'warden', 'crew']);
     step(sim, { throttle: 0, steer: 0, leave: true }, DT);
     expect(sim.status).toBe('win');
   });
@@ -306,10 +308,35 @@ describe('Jobs 2–5 clear with the right packet', () => {
     ]);
     expect(sim.status).toBe('win');
   });
-  it('grade without the shape card fails', () => {
+  it('grade without the shape card can drive, then fails on the shelf', () => {
     const sim = createSim('grade', ['grade.lift']);
     drive(sim, [[4, 2]]);
+    expect(sim.status).toBe('play');
+    drive(sim, ['F', [4, 4]]);
     expect(sim.status).toBe('fail');
+    expect(sim.reason).toContain('one depth');
+    expect(sim.failAt).toBe(3 * sim.w + 4);
+  });
+  it('the lift fact warns before the ramp', () => {
+    const sim = createSim('grade', ['grade.shape', 'grade.lift']);
+    place(sim, 6, 10);
+    step(sim, { throttle: 0, steer: 0, use: true }, DT); // shelf
+    drive(sim, [[6, 9]]);
+    expect(sim.log.some((l) => l.text.startsWith('GRADE: lift the blade'))).toBe(true);
+  });
+  it('rigger with no tool fact fails at the flag instead of leaving you stuck', () => {
+    const sim = createSim('rigger', []);
+    drive(sim, [[5, 7], [5, 1]]);
+    expect(sim.status).toBe('fail');
+    expect(sim.reason).toContain('Bare front');
+  });
+  it('survey reveals the hidden ground after a fail', () => {
+    const sim = createSim('survey', []);
+    expect(sim.surveyed).toBe(false);
+    drive(sim, [[5, 1]]);
+    expect(sim.status).toBe('fail');
+    expect(sim.revealed).toBe(true);
+    expect(sim.kind[sim.failAt]).toBe('bank');
   });
   it('warden', () => {
     const sim = createSim('warden', ['warden.hook']);

@@ -9,6 +9,7 @@ import {
   tileAt,
   type AutoOp,
   type JobId,
+  type Phase,
   type LevelDef,
   type Mode,
   type Target,
@@ -39,6 +40,9 @@ interface AutoState {
   rebound: boolean;
   rebindT: number;
   done: boolean;
+  phase: Phase | null;
+  /** Phases finished, in order */
+  passed: Phase[];
 }
 
 export interface Sim {
@@ -70,6 +74,12 @@ export interface Sim {
   shake: number;
   /** distance driven, for track treads */
   odo: number;
+  /** Tile that caused the fail, or -1 */
+  failAt: number;
+  /** After a fail, hidden ground is drawn as it really was */
+  revealed: boolean;
+  /** Tile the ramp warning was last given from, or -1 */
+  rampWarned: number;
   auto: AutoState | null;
 }
 
@@ -106,8 +116,11 @@ export function createSim(job: JobId, cards: CardId[] = [], steps: Step[] = []):
     time: 0,
     shake: 0,
     odo: 0,
+    failAt: -1,
+    revealed: false,
+    rampWarned: -1,
     auto: level.auto
-      ? { ops: level.auto, i: 0, t: 0, bumpsAt: 0, rebound: false, rebindT: 0, done: false }
+      ? { ops: level.auto, i: 0, t: 0, bumpsAt: 0, rebound: false, rebindT: 0, done: false, phase: null, passed: [] }
       : null,
   };
   for (const s of steps) say(sim, s.log);
@@ -124,13 +137,29 @@ export function say(sim: Sim, text: string) {
 export function modeLabel(sim: Sim): string {
   if (sim.tool === 'none') return 'No tool.';
   const locked = sim.modes.length === 1 ? ' Locked.' : '';
-  return `${sim.tool === 'blade' ? 'Blade' : 'Scoop'} ${sim.mode.toUpperCase()}.${locked}`;
+  const oneDepth = sim.mode === 'deep' && !sim.modes.includes('shelf') ? ' One depth only.' : '';
+  return `${sim.tool === 'blade' ? 'Blade' : 'Scoop'} ${sim.mode.toUpperCase()}.${locked}${oneDepth}`;
 }
 
-export function fail(sim: Sim, reason: string) {
+/** What F does next, for the HUD. */
+export function nextUse(sim: Sim): string {
+  if (!sim.yokeBound) return 'BIND YOKE';
+  if (sim.level.id === 'dispatch' || sim.tool === 'none' || sim.modes.length < 2) return '';
+  let i = MODE_CYCLE.indexOf(sim.mode);
+  for (let n = 0; n < 3; n++) {
+    i = (i + 1) % 3;
+    if (sim.modes.includes(MODE_CYCLE[i])) break;
+  }
+  const m = MODE_CYCLE[i];
+  return m === 'up' ? 'LIFT' : `LOWER ${m.toUpperCase()}`;
+}
+
+export function fail(sim: Sim, reason: string, at = -1) {
   if (sim.status !== 'play') return;
   sim.status = 'fail';
   sim.reason = reason;
+  sim.failAt = at >= 0 ? at : tileAt(sim, sim.x, sim.z);
+  sim.revealed = true;
   sim.speed = 0;
   sim.shake = 0.45;
   say(sim, `FAIL: ${reason}`);
@@ -228,7 +257,7 @@ export function enter(sim: Sim, from: number, to: number): Enter {
       bump(sim, to, 'fence');
       return 'hook';
     }
-    fail(sim, 'Through the fence. It was only a request.');
+    fail(sim, 'Through the fence. It was only a request.', to);
     return 'fail';
   }
   if (k === 'water') {
@@ -236,11 +265,11 @@ export function enter(sim: Sim, from: number, to: number): Enter {
       bump(sim, to, 'water');
       return 'hook';
     }
-    fail(sim, 'You charged a lake that was already there.');
+    fail(sim, 'You charged a lake that was already there.', to);
     return 'fail';
   }
   if (k === 'bank') {
-    fail(sim, sim.surveyed ? 'Soft bank. The machine rolled.' : 'The ground gave way. Survey never had the bank.');
+    fail(sim, sim.surveyed ? 'Soft bank. The machine rolled.' : 'The ground gave way. Survey never had the bank.', to);
     return 'fail';
   }
 
@@ -249,16 +278,22 @@ export function enter(sim: Sim, from: number, to: number): Enter {
 
   // The iron hits the tile first.
   if (lowered && sim.tool === 'scoop' && (t === 'shelf' || t === 'deep')) {
-    fail(sim, 'The scoop cannot push this cut.');
+    fail(sim, 'The scoop cannot push this cut.', to);
     return 'fail';
   }
   if (lowered && sim.tool === 'blade' && cuttable(k)) {
     if (t === 'ramp') {
-      fail(sim, 'You cut the ramp. Now the hole has no way out.');
+      fail(sim, 'You cut the ramp with the blade down. Now the hole has no way out.', to);
       return 'fail';
     }
     if (t === 'shelf' && sim.mode === 'deep') {
-      fail(sim, 'Deep blade on the shelf. The edge caved in.');
+      fail(
+        sim,
+        sim.modes.includes('shelf')
+          ? 'Deep blade on the shelf. The edge caved in.'
+          : 'Deep blade on the shelf. The edge caved in. Grade only knew one depth.',
+        to,
+      );
       return 'fail';
     }
   }
@@ -269,22 +304,23 @@ export function enter(sim: Sim, from: number, to: number): Enter {
   const toD = Math.max(sim.depth[to], cutTo);
   const viaRamp = sim.target[to] === 'ramp' || (from >= 0 && sim.target[from] === 'ramp');
   if (fromD - toD > 1 && !viaRamp) {
+    const msg = 'Too steep to climb. Cut a shelf step, or take the ramp.';
     const last = sim.log[sim.log.length - 1];
-    if (!last || last.text !== 'Too steep. No way up from here.') say(sim, 'Too steep. No way up from here.');
+    if (!last || last.text !== msg) say(sim, msg);
     return 'wall';
   }
 
   if (cutTo > 0) {
     sim.depth[to] = Math.max(sim.depth[to], cutTo);
     if (t === 'none' && sim.depth[to] >= 2) {
-      fail(sim, 'You sat in a hole you dug. It has no way out.');
+      fail(sim, 'Deep cut off the plan. You sat in a hole you dug, and it has no way out.', to);
       return 'fail';
     }
   }
 
   if (k === 'belt' && !sim.beltTripped) {
     sim.beltTripped = true;
-    dropYoke(sim, 'Dead belt. Yoke unbound. Speed zero.');
+    dropYoke(sim, 'Dead belt. Yoke unbound. Speed zero. Press F / USE to bind it.');
   }
 
   if (k === 'pad' && sim.level.hasPad && sim.tool === 'none') {
@@ -296,7 +332,7 @@ export function enter(sim: Sim, from: number, to: number): Enter {
       say(sim, `${sim.level.id === 'dispatch' ? 'RIGGER: ' : ''}Pad mounted a ${sim.tool}. ${modeLabel(sim)}`);
     } else {
       const last = sim.log[sim.log.length - 1];
-      const msg = 'Pad: nothing in the packet. Nothing mounts.';
+      const msg = 'Pad: Rigger has no tool fact. Nothing mounts.';
       if (!last || last.text !== msg) say(sim, msg);
     }
   }
@@ -377,13 +413,20 @@ function autopilot(sim: Sim, dt: number): Drive {
       say(sim, op.text);
       next();
       return idle;
+    case 'phase':
+      if (a.phase) a.passed.push(a.phase);
+      a.phase = op.agent;
+      next();
+      return idle;
     case 'mode':
       setMode(sim, op.mode);
       next();
       return idle;
     case 'park':
       if (Math.abs(sim.speed) < 0.02) {
-        say(sim, 'CREW: parked at the flag. Your call, Dispatch.');
+        say(sim, 'CREW: parked at the flag. Your call, Dispatch. Press LEAVE.');
+        if (a.phase) a.passed.push(a.phase);
+        a.phase = null;
         a.done = true;
         next();
       }
@@ -415,6 +458,19 @@ function steerTo(sim: Sim, tx: number, tz: number, dist: number): Drive {
   const steer = Math.max(-1, Math.min(1, diff * 4));
   if (Math.abs(diff) > 0.12) return { throttle: 0, steer };
   return { throttle: Math.max(0.08, Math.min(1, dist * 1.4)), steer };
+}
+
+/** The extra Grade fact earns its place: it warns before the ramp. */
+function rampWarning(sim: Sim) {
+  if (!sim.cards.includes('grade.lift')) return;
+  const here = tileAt(sim, sim.x, sim.z);
+  const ahead = tileAt(sim, sim.x - Math.sin(sim.yaw) * 0.9, sim.z - Math.cos(sim.yaw) * 0.9);
+  const facingRamp = ahead >= 0 && ahead !== here && sim.target[ahead] === 'ramp' && sim.target[here] !== 'ramp';
+  const danger = facingRamp && sim.tool === 'blade' && sim.mode !== 'up';
+  if (danger && sim.rampWarned !== here) {
+    sim.rampWarned = here;
+    say(sim, 'GRADE: lift the blade before you drive the ramp. Press F.');
+  }
 }
 
 /** Advance the site by dt seconds. */
@@ -456,6 +512,7 @@ export function step(sim: Sim, intent: Intent, dt: number) {
   }
   sim.odo += Math.hypot(sim.x - x0, sim.z - z0) * Math.sign(sim.speed || 1) + Math.abs(d.steer) * dt * 0.3;
   if (sim.status !== 'play') return;
+  rampWarning(sim);
 
   const out = sim.level.check(sim);
   if (out?.status === 'win') win(sim);
